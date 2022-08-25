@@ -22,6 +22,17 @@ float g_fInfectRatio;
 bool g_bZombieSpawned;
 bool g_bAlreadyMother[MAXPLAYERS+1] = {false, ...};
 
+#define MAXCLASS 10
+
+enum struct HumanClass_Data
+{
+	char hc_classname[64];
+	float hc_speed;
+	int hc_health;
+}
+
+HumanClass_Data g_humanclass[MAXCLASS];
+
 public Plugin myinfo = 
 {
 	name = "[TF2] Zombie Mod",
@@ -38,6 +49,46 @@ public void OnPluginStart()
 	
 	g_Cvar_Countdown = CreateConVar("zm_infect_countdown_length", "20.0", "Timer countdown for first mother zombie infection.", _, true, 5.0, false);
 	g_Cvar_InfectRatio = CreateConVar("zm_infect_motherzombie_ratio", "7.0", "Ratio for motherzombie to spawn in first infection.", _, true, 1.0, true, 32.0);
+}
+
+public void OnConfigsExecuted()
+{
+	ClassInit();
+}
+
+void ClassInit()
+{
+	ClassHumanLoad();
+}
+
+void ClassHumanLoad()
+{
+	char path[PLATFORM_MAX_PATH];
+	BuildPath(Path_SM, path, PLATFORM_MAX_PATH, "configs/zm/humans.cfg");
+	
+	if(!FileExists(path))
+	{
+		SetFailState("Couldn't find human class config file \"%s\".", path);
+		return;
+	}
+	
+	KeyValues kv = CreateKeyValues("human");
+	FileToKeyValues(kv, path);
+	
+	int classindex = 0;
+	
+	if(KvGotoFirstSubKey(kv))
+	{
+		do
+		{
+			KvGetSectionName(kv, g_humanclass[classindex].hc_classname, 64);
+			g_humanclass[classindex].hc_speed = KvGetFloat(kv, "speed", 300.0);
+			g_humanclass[classindex].hc_health = KvGetNum(kv, "health", 200);
+		}
+		while(KvGotoNextKey(kv));
+	}
+	
+	delete kv;
 }
 
 public void OnRoundActive(Event event, const char[] name, bool dontBroadcast)
@@ -147,10 +198,37 @@ bool IsClientHuman(int client)
 
 stock int GetRandomPlayer()
 {
-    int[] clients = new int[MaxClients + 1];
-    int clientCount;
-    for (int i = 1; i <= MaxClients; i++)
-    if (IsClientInGame(i) && IsPlayerAlive(i) && IsClientZombie(i))
-        clients[clientCount++] = i;
-    return (clientCount == 0) ? -1 : clients[GetRandomInt(0, clientCount - 1)];
+	int[] clients = new int[MaxClients + 1];
+	int clientCount;
+	for (int i = 1; i <= MaxClients; i++)
+	if (IsClientInGame(i) && IsPlayerAlive(i) && IsClientZombie(i))
+		clients[clientCount++] = i;
+	return (clientCount == 0) ? -1 : clients[GetRandomInt(0, clientCount - 1)];
 } 
+
+void TF_TerminateRound(TFTeam team)
+{
+	if(team != TFTeam_Blue && team != TFTeam_Red)
+		team = TFTeam_Unassigned;
+		
+	int entity = -1;
+	entity = FindEntityByClassname(entity, "game_round_win");
+	
+	if(entity < 1)
+	{
+		entity = CreateEntityByName("game_round_win");
+		
+		if(IsValidEntity(entity))
+			DispatchSpawn(entity);
+			
+		else
+		{
+			SetFailState("Unable to find or create a game_round_win entity!");
+			return;
+		}
+	}
+	
+	SetVariantInt(view_as<int>(team));
+	AcceptEntityInput(entity, "SetTeam");
+	AcceptEntityInput(entity, "RoundWin");
+}
