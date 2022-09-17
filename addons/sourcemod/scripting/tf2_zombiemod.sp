@@ -2,7 +2,11 @@
 
 #include <sourcemod>
 #include <tf2>
+#include <tf2_stocks>
 #include <sdktools>
+#include <sdkhooks>
+
+#include <tf2_zm>
 
 #pragma newdecls required
 
@@ -31,7 +35,16 @@ enum struct HumanClass_Data
 	int hc_health;
 }
 
+enum struct ZombieClass_Data
+{
+	char zc_classname[64];
+	char zc_modelpath[PLATFORM_MAX_PATH];
+	float zc_speed;
+	int zc_health;
+}
+
 HumanClass_Data g_humanclass[MAXCLASS];
+ZombieClass_Data g_zombieclass[MAXCLASS];
 
 public Plugin myinfo = 
 {
@@ -46,6 +59,7 @@ public void OnPluginStart()
 {
 	HookEvent("teamplay_round_active", OnRoundActive);
 	HookEvent("teamplay_win_panel", OnRoundEnd);
+	HookEvent("player_hurt", OnPlayerHurt);
 	
 	g_Cvar_Countdown = CreateConVar("zm_infect_countdown_length", "20.0", "Timer countdown for first mother zombie infection.", _, true, 5.0, false);
 	g_Cvar_InfectRatio = CreateConVar("zm_infect_motherzombie_ratio", "7.0", "Ratio for motherzombie to spawn in first infection.", _, true, 1.0, true, 32.0);
@@ -59,6 +73,7 @@ public void OnConfigsExecuted()
 void ClassInit()
 {
 	ClassHumanLoad();
+	ClassZombieLoad();
 }
 
 void ClassHumanLoad()
@@ -91,9 +106,51 @@ void ClassHumanLoad()
 	delete kv;
 }
 
+void ClassZombieLoad()
+{
+	char path[PLATFORM_MAX_PATH];
+	BuildPath(Path_SM, path, PLATFORM_MAX_PATH, "configs/zm/zombie.cfg");
+	
+	if(!FileExists(path))
+	{
+		SetFailState("Couldn't find zombie class config file \"%s\".", path);
+		return;
+	}
+	
+	KeyValues kv = CreateKeyValues("zombie");
+	FileToKeyValues(kv, path);
+	
+	int classindex = 0;
+	
+	if(KvGotoFirstSubKey(kv))
+	{
+		do
+		{
+			KvGetSectionName(kv, g_zombieclass[classindex].zc_classname, 64);
+			KvGetString(kv, "model_path", g_zombieclass[classindex].zc_modelpath, PLATFORM_MAX_PATH, "default");
+			g_zombieclass[classindex].zc_speed = KvGetFloat(kv, "speed", 300.0);
+			g_zombieclass[classindex].zc_health = KvGetNum(kv, "health", 200);
+		}
+		while(KvGotoNextKey(kv));
+	}
+	
+	delete kv;
+}
+
 public void OnRoundActive(Event event, const char[] name, bool dontBroadcast)
 {
 	InitFirstInfection();
+}
+
+public void OnPlayerHurt(Event event, const char[] name, bool dontBroadcast)
+{
+	int client = GetClientOfUserId(event.GetInt("userid"));
+	int attacker = GetClientOfUserId(event.GetInt("attacker"));
+
+	if(bZombie[attacker])
+	{
+		InfectClient(client);
+	}
 }
 
 void InitFirstInfection()
@@ -169,9 +226,9 @@ public void OnRoundEnd(Event event, const char[] name, bool dontBroadcast)
 	g_bZombieSpawned = false;
 }
 
-void InfectClient(int client, bool motherzombie)
+void InfectClient(int client, bool motherzombie = false)
 {
-	if(IsClientZombie(client))
+	if(!IsClientInGame(client) || !IsPlayerAlive(client))
 	{
 		return;
 	}
@@ -179,11 +236,56 @@ void InfectClient(int client, bool motherzombie)
 	bZombie[client] = true;
 	
 	PrintToChat(client, "[ZM] You have been infected!");
+
+	TFClassType clientclass = TF2_GetPlayerClass(client);
+
+	ApplyClientZombieClass(client, clientclass);
 	
 	if(motherzombie)
 	{
 		g_bAlreadyMother[client] = true;
 	}
+}
+
+void ApplyClientZombieClass(int client, TFClassType class)
+{
+	if(!IsClientInGame(client) || !IsPlayerAlive(client))
+	{
+		return;
+	}
+
+	int classconvert = view_as<int>(class);
+	int classindex = GetClassIndexByName(g_sClassString[classconvert], bZombie[client]);
+
+	SetEntityModel(client, g_zombieclass[classindex].zc_modelpath);
+	SetEntityHealth(client, g_zombieclass[classindex].zc_health);
+}
+
+int GetClassIndexByName(const char[] classname, bool zombie)
+{
+	if(!zombie)
+	{
+		for(int i = 0; i < MAXCLASS; i++)
+		{
+			if(StrEqual(classname, g_humanclass[i].hc_classname))
+			{
+				return i;
+			}
+		}
+	}
+
+	else
+	{
+		for(int i = 0; i < MAXCLASS; i++)
+		{
+			if(StrEqual(classname, g_zombieclass[i].zc_classname))
+			{
+				return i;
+			}
+		}
+	}
+
+	return -1;
 }
 
 bool IsClientZombie(int client)
