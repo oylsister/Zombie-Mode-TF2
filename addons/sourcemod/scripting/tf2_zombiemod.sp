@@ -60,6 +60,7 @@ public void OnPluginStart()
 	HookEvent("teamplay_round_active", OnRoundActive);
 	HookEvent("teamplay_win_panel", OnRoundEnd);
 	HookEvent("player_hurt", OnPlayerHurt);
+	HookEvent("player_death", OnPlayerDeath);
 	
 	g_Cvar_Countdown = CreateConVar("zm_infect_countdown_length", "20.0", "Timer countdown for first mother zombie infection.", _, true, 5.0, false);
 	g_Cvar_InfectRatio = CreateConVar("zm_infect_motherzombie_ratio", "7.0", "Ratio for motherzombie to spawn in first infection.", _, true, 1.0, true, 32.0);
@@ -76,6 +77,21 @@ void ClassInit()
 	ClassZombieLoad();
 }
 
+public void OnClientPutInServer(int client)
+{
+	bZombie[client] = false;
+	g_bAlreadyMother[client] = false;
+}
+
+public void OnClientDisconnect(int client)
+{
+	bZombie[client] = false;
+	g_bAlreadyMother[client] = false;
+
+	if(g_bZombieSpawned)
+		CheckGameStatus();
+}
+
 void ClassHumanLoad()
 {
 	char path[PLATFORM_MAX_PATH];
@@ -90,7 +106,7 @@ void ClassHumanLoad()
 	KeyValues kv = CreateKeyValues("human");
 	FileToKeyValues(kv, path);
 	
-	int classindex = 0;
+	int classindex = 1;
 	
 	if(KvGotoFirstSubKey(kv))
 	{
@@ -99,6 +115,8 @@ void ClassHumanLoad()
 			KvGetSectionName(kv, g_humanclass[classindex].hc_classname, 64);
 			g_humanclass[classindex].hc_speed = KvGetFloat(kv, "speed", 300.0);
 			g_humanclass[classindex].hc_health = KvGetNum(kv, "health", 200);
+
+			classindex++;
 		}
 		while(KvGotoNextKey(kv));
 	}
@@ -120,7 +138,7 @@ void ClassZombieLoad()
 	KeyValues kv = CreateKeyValues("zombie");
 	FileToKeyValues(kv, path);
 	
-	int classindex = 0;
+	int classindex = 1;
 	
 	if(KvGotoFirstSubKey(kv))
 	{
@@ -130,6 +148,8 @@ void ClassZombieLoad()
 			KvGetString(kv, "model_path", g_zombieclass[classindex].zc_modelpath, PLATFORM_MAX_PATH, "default");
 			g_zombieclass[classindex].zc_speed = KvGetFloat(kv, "speed", 300.0);
 			g_zombieclass[classindex].zc_health = KvGetNum(kv, "health", 200);
+
+			classindex++;
 		}
 		while(KvGotoNextKey(kv));
 	}
@@ -149,8 +169,22 @@ public void OnPlayerHurt(Event event, const char[] name, bool dontBroadcast)
 
 	if(bZombie[attacker])
 	{
-		InfectClient(client);
+		InfectClient(client, attacker);
 	}
+}
+
+public void OnPlayerDeath(Event event, const char[] name, bool dontBroadcast)
+{
+	int client = GetClientOfUserId(event.GetInt("userid"));
+	int attacker = GetClientOfUserId(event.GetInt("attacker"));
+
+	if(attacker == -1 && IsClientHuman(client) && g_bZombieSpawned)
+	{
+		bZombie[client] = true;
+	}
+
+	if(g_bZombieSpawned)
+		CheckGameStatus();	
 }
 
 void InitFirstInfection()
@@ -226,7 +260,7 @@ public void OnRoundEnd(Event event, const char[] name, bool dontBroadcast)
 	g_bZombieSpawned = false;
 }
 
-void InfectClient(int client, bool motherzombie = false)
+void InfectClient(int client, int attacker = -1, bool motherzombie = false)
 {
 	if(!IsClientInGame(client) || !IsPlayerAlive(client))
 	{
@@ -237,6 +271,9 @@ void InfectClient(int client, bool motherzombie = false)
 	
 	PrintToChat(client, "[ZM] You have been infected!");
 
+	if(TF2_GetClientTeam(client) == TFTeam_Blue)
+		TF2_ChangeClientTeam(client, TFTeam_Red);
+
 	TFClassType clientclass = TF2_GetPlayerClass(client);
 
 	ApplyClientZombieClass(client, clientclass);
@@ -245,6 +282,53 @@ void InfectClient(int client, bool motherzombie = false)
 	{
 		g_bAlreadyMother[client] = true;
 	}
+
+	if(attacker != -1)
+	{
+		Event event = CreateEvent("player_death");
+		if(event != null)
+		{
+			event.SetInt("userid", client);
+			event.SetInt("attacker", attacker);
+			event.SetString("weapon", "zombie_claws_of_death");
+			event.Fire(false);
+		}
+		InfectUpdateScore(attacker, client);
+	}
+
+	if(!motherzombie)
+		CheckGameStatus();
+}
+
+void InfectUpdateScore(int client, int victim)
+{
+	// Set "TF2 Player's Score point"
+	int atk_offset = FindSendPropInfo("CTFPlayerResource", "m_iScore");
+
+	if(atk_offset < 1)
+		return;
+
+	int score_ent = GetPlayerResourceEntity();
+
+	if(score_ent == -1)
+		return;
+
+	int score = GetEntData(score_ent, atk_offset + (client*4));
+	SetEntData(score_ent, atk_offset + (client*4), score + 1);
+
+	// Set "TF2 Player's Death score"
+	int victim_offset = FindSendPropInfo("CTFPlayerResource", "m_iDeaths");
+
+	if(victim_offset < 1)
+		return;
+
+	int death_ent = GetPlayerResourceEntity();
+
+	if(death_ent == -1)
+		return;
+
+	int death = GetEntData(death_ent, victim_offset + (victim*4));
+	SetEntData(score_ent, victim_offset + (victim*4), death + 1);
 }
 
 void ApplyClientZombieClass(int client, TFClassType class)
@@ -307,6 +391,30 @@ stock int GetRandomPlayer()
 		clients[clientCount++] = i;
 	return (clientCount == 0) ? -1 : clients[GetRandomInt(0, clientCount - 1)];
 } 
+
+void CheckGameStatus()
+{
+	int humans = 0;
+	int zombie = 0;
+
+	for(int i = 1; i < MaxClients; i++)
+	{
+		if(IsClientInGame(i) && IsPlayerAlive(i))
+		{
+			if(IsClientHuman(i))
+				humans++;
+
+			else if(IsClientZombie(i))
+				zombie++;
+		}
+	}
+
+	if(humans == 0)
+		TF_TerminateRound(TFTeam_Red);
+
+	else if(zombie == 0)
+		TF_TerminateRound(TFTeam_Blue);
+}
 
 void TF_TerminateRound(TFTeam team)
 {
